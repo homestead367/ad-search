@@ -28,6 +28,59 @@ function Show-Banner {
     Write-Host ""
 }
 
+function Confirm-RunAsCurrentUser {
+    $currentUser = "$env:USERDOMAIN\$env:USERNAME"
+    Write-Host "  Detected current user: " -NoNewline
+    Write-Host $currentUser -ForegroundColor Yellow
+    Write-Host ""
+
+    $deadline  = (Get-Date).AddSeconds(30)
+    $answered  = $false
+    $useCurrentUser = $true
+
+    while ((Get-Date) -lt $deadline -and -not $answered) {
+        $remaining = [math]::Ceiling(($deadline - (Get-Date)).TotalSeconds)
+        Write-Host "`r  Run as current user? [Y/N]  (auto-yes in ${remaining}s)  " -NoNewline
+
+        if ($Host.UI.RawUI.KeyAvailable) {
+            $key = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+            if ($key.Character -in @('Y','y')) {
+                $useCurrentUser = $true
+                $answered = $true
+            } elseif ($key.Character -in @('N','n')) {
+                $useCurrentUser = $false
+                $answered = $true
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    Write-Host ""
+
+    if ($useCurrentUser) {
+        Write-Host "  Connecting as $currentUser..." -ForegroundColor Cyan
+        # ActiveDirectory module uses current session credentials by default
+        if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
+            Write-Host "  [ERROR] ActiveDirectory module not found." -ForegroundColor Red
+            Write-Host "  Install RSAT: Add-WindowsCapability -Online -Name Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0" -ForegroundColor Yellow
+            return $false
+        }
+        Import-Module ActiveDirectory -ErrorAction SilentlyContinue
+        try {
+            $dc = Get-ADDomainController -Discover -ErrorAction Stop
+            Write-Host "  [OK] Connected to domain: $($dc.Domain) via $($dc.HostName)" -ForegroundColor Green
+            $script:ADSource = "LocalAD"
+            return $true
+        } catch {
+            Write-Host "  [ERROR] Cannot reach a domain controller: $_" -ForegroundColor Red
+            Write-Host "  Falling through to manual source selection..." -ForegroundColor Yellow
+            return $false
+        }
+    }
+
+    return $false
+}
+
 function Select-Source {
     Write-Host "  Select data source:" -ForegroundColor White
     Write-Host "    [L]  Local AD Domain Controller"
@@ -68,13 +121,17 @@ function Show-Menu {
 # ── Main loop ─────────────────────────────────────────────────────────────────
 Show-Banner
 
-# Initial source selection
-$connected = $false
-while (-not $connected) {
-    $connected = Select-Source
-    if (-not $connected) {
-        Write-Host "  Connection failed. Try again." -ForegroundColor Yellow
-        Write-Host ""
+# Offer current-user fast path; fall through to manual selection if declined or fails
+$connected = Confirm-RunAsCurrentUser
+
+if (-not $connected) {
+    Write-Host ""
+    while (-not $connected) {
+        $connected = Select-Source
+        if (-not $connected) {
+            Write-Host "  Connection failed. Try again." -ForegroundColor Yellow
+            Write-Host ""
+        }
     }
 }
 
